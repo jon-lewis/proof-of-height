@@ -150,11 +150,15 @@ mod tests {
     #[test]
     fn test_new() {
         let mut context = get_context(accounts(1));
-        testing_env!(context.build());
-        let contract = Contract::new();
+        let mut contract = Contract::new();
+        
         testing_env!(context.is_view(true).build());
         assert_eq!(contract.get_height_inches(accounts(1)), None);
+
+        testing_env!(context.is_view(false).build());
         contract.set_height_inches(72);
+        
+        testing_env!(context.is_view(true).build());
         assert_eq!(contract.get_height_inches(accounts(1)), Some(72));
     }
 }
