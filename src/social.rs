@@ -1,3 +1,5 @@
+use near_sdk::serde_json::json;
+
 use crate::*;
 
 pub const GAS_FOR_SOCIAL_GET: Gas = Gas(Gas::ONE_TERA.0 * 10);
@@ -26,26 +28,22 @@ pub trait ExtContract {
 
 impl Contract {
     pub fn internal_social_set(&mut self, badge: String, account_id: AccountId) {
-        let mut account_data: Map<String, Value> = Map::new();
-        account_data.insert(account_id.to_string(), Value::String("".to_string()));
-
-        let mut holder_data: Map<String, Value> = Map::new();
-        holder_data.insert("holder".to_string(), Value::Object(account_data));
-
-        let mut badge_data: Map<String, Value> = Map::new();
-        badge_data.insert(badge, Value::Object(holder_data));
-
-        let mut app_data: Map<String, Value> = Map::new();
-        app_data.insert("badge".to_string(), Value::Object(badge_data));
-
-        let mut data: Map<String, Value> = Map::new();
-        data.insert(env::current_account_id().to_string(), Value::Object(app_data));
-
         ext_social::ext(AccountId::new_unchecked(NEAR_SOCIAL_ACCOUNT_ID.to_string()))
             .with_static_gas(GAS_FOR_SOCIAL_SET)
             .with_attached_deposit(DEPOSIT_FOR_SOCIAL_SET)
             .set(
-                Value::Object(data)
+                json!({
+                    NEAR_SOCIAL_ACCOUNT_ID: {
+                        "badge": {
+                            badge: {
+                                // TODO should we add metadata here or do we define that outside of the contract?
+                                "holder": {
+                                    account_id.as_str(): ""
+                                }
+                            }
+                        }
+                    }
+                })
             );
     }
 }

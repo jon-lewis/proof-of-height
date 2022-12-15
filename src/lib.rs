@@ -1,28 +1,59 @@
 use near_sdk::{
-    near_bindgen, AccountId, BorshStorageKey, PanicOnDefault, Gas, env, ext_contract, log, PromiseError, Promise, PromiseOrValue, require, Balance,
+    near_bindgen, AccountId, BorshStorageKey, PanicOnDefault, Gas, env, ext_contract, Balance,
     borsh::{self, BorshDeserialize, BorshSerialize},
     collections::{LookupMap},
-    serde::{Deserialize, Serialize},
+    serde::{Deserialize, Serialize}, store::UnorderedSet, CryptoHash, require,
 };
-use near_sdk::serde_json::{Map, Value};
-mod social;
+use near_sdk::serde_json::{Value};
+//mod social;
 
 //use crate::social::*;
 
 const NEAR_SOCIAL_ACCOUNT_ID: &str = "social.near";
-const NEAR_SOCIAL_APP_NAME: &str = "ProofofHeight";
-const NEAR_SOCIAL_WINNER_BADGE: &str = "height";
+// const NEAR_SOCIAL_APP_NAME: &str = "Proof of Height";
+// const NEAR_SOCIAL_WINNER_BADGE: &str = "height";
 
 #[derive(BorshSerialize, BorshStorageKey)]
 pub enum StorageKey {
-    UsersHeight
+    UsersHeight,
+    VotesByUser,
+    VotersByUser,
+    SubVotersByUserSet { account_hash: CryptoHash },
 }
 
+#[derive(BorshDeserialize, BorshSerialize, Clone, Deserialize, Serialize)]
+#[serde(crate = "near_sdk::serde")]
+pub enum VoteChoice {
+    DefinitelyYes,
+    Yes,
+    No,
+    DefinitelyNo
+}
+
+#[derive(BorshDeserialize, BorshSerialize)]
+pub struct Votes {
+    weighted_sum: i64,
+    total_votes: u32,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Clone, Deserialize, Serialize, PartialEq, Debug)]
+#[serde(crate = "near_sdk::serde")]
+pub enum Confidence {
+    VeryConfidentLie,
+    MostlyConfidentLie,
+    Inconclusive,
+    MostlyConfidentTrue,
+    VeryConfidentTrue
+}
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct Contract {
     users_height: LookupMap<AccountId, u8>,
+    // a map of current voting outcome for a specific user
+    votes_by_user: LookupMap<AccountId, Votes>,
+    // a map of a set of users that voted on a specific user
+    voters_by_user: LookupMap<AccountId, UnorderedSet<AccountId>>, 
 }
 
 #[near_bindgen]
@@ -31,11 +62,37 @@ impl Contract {
     pub fn new() -> Self {
         Self {
             users_height: LookupMap::new(StorageKey::UsersHeight),
+            votes_by_user: LookupMap::new(StorageKey::VotesByUser),
+            voters_by_user: LookupMap::new(StorageKey::VotersByUser),
         }
     }
 
     pub fn get_height_inches(&self, account_id: AccountId) -> Option<u8> {
         self.users_height.get(&account_id)
+    }
+
+    pub fn get_who_voted_for(&self, account_id: AccountId) -> Vec<AccountId> {
+        match self.voters_by_user.get(&account_id) {
+            Some(voters) => voters.iter().cloned().collect::<Vec<AccountId>>(),
+            None => vec![]
+        }
+    }
+
+    pub fn get_confidence(&self, account_id: AccountId) -> Option<Confidence> {
+        match self.votes_by_user.get(&account_id) {
+            None => None,
+            Some(votes) => {
+                let score = votes.weighted_sum / votes.total_votes as i64;
+                println!("Score: {}", score);
+                Some(match score {
+                    -2 => Confidence::VeryConfidentLie,
+                    -1 => Confidence::MostlyConfidentLie,
+                    1 => Confidence::MostlyConfidentTrue,
+                    2 => Confidence::VeryConfidentTrue,
+                    _ => Confidence::Inconclusive
+                })
+            }
+        }
     }
 
     #[payable]
@@ -45,90 +102,42 @@ impl Contract {
         require!(!self.users_height.contains_key(&account_id), "Can't change your height");
 
         self.users_height.insert(&account_id, &height);
+        self.votes_by_user.insert(&account_id, &Votes { weighted_sum: 0, total_votes: 0 });
+
+        // Ref: https://docs.near.org/sdk/rust/contract-structure/nesting#generating-unique-prefixes-for-persistent-collections
+        self.voters_by_user.insert(&account_id, & UnorderedSet::new(StorageKey::SubVotersByUserSet {
+            account_hash: env::sha256_array(account_id.as_bytes()),
+        }));
     }
 
-    // // finalize the game. Read data from social, verify, calculate score and create NFT & Social badge for winners
-    // #[payable]
-    // pub fn nft_mint(&mut self, receiver_id: AccountId) -> PromiseOrValue<usize> {
-    //     let account_id = env::predecessor_account_id();
-    //     require!(receiver_id == account_id, "Illegal receiver");
-    //     require!(self.players_score.get(&account_id).is_none(), "Already finalized");
+    #[payable]
+    pub fn vote(&mut self, account_id: AccountId, vote: VoteChoice) {
+        let current_user = env::predecessor_account_id();
 
-    //     let get_request = format!("{}/{}/**", account_id, NEAR_SOCIAL_APP_NAME);
+        require!(current_user != account_id, "Can't confirm your own height");
+        require!(self.voters_by_user.contains_key(&account_id) && self.votes_by_user.contains_key(&account_id), "This user must enter their height first");
 
-    //     ext_social::ext(AccountId::new_unchecked(NEAR_SOCIAL_ACCOUNT_ID.to_string()))
-    //         .with_static_gas(GAS_FOR_SOCIAL_GET)
-    //         .get(
-    //             vec![get_request],
-    //             None,
-    //         )
-    //         .then(
-    //             ext_self::ext(env::current_account_id())
-    //                 .with_static_gas(GAS_FOR_AFTER_SOCIAL_GET)
-    //                 .with_attached_deposit(env::attached_deposit())
-    //                 .after_social_get()
-    //         ).into()
-    // }
+        // Ref: https://docs.near.org/sdk/rust/contract-structure/nesting
+        let mut voters = self.voters_by_user.get(&account_id).unwrap();
+        require!(!voters.contains(&current_user), "Can't vote more than once");
+        voters.insert(current_user);
+        self.voters_by_user.insert(&account_id, &voters);
 
-    // #[payable]
-    // #[private]
-    // pub fn after_social_get(
-    //     &mut self,
-    //     #[callback_result] value: Result<Value, PromiseError>,
-    // ) -> usize {
-    //     let mut score: usize = 0;
-    //     if let Ok(mut value) = value {
-    //         let data = value.as_object_mut().expect("Data is not a JSON object");
-    //         for (account_id, value) in data {
-    //             let account_id = AccountId::new_unchecked(account_id.to_owned());
-    //             let turns = self.get_turns(account_id.clone());
-
-    //             for (turn_index, turn_data) in value.get(NEAR_SOCIAL_APP_NAME.to_string()).expect("Missing data").as_object().expect("Missing turns") {
-    //                 let turn_index = turn_index.to_owned().parse::<usize>().unwrap();
-    //                 require!(turn_index < MAX_TURNS, "Illegal turn index");
-    //                 for (key, value) in turn_data.as_object().unwrap() {
-    //                     let value = value.as_str().unwrap();
-    //                     if key == "bot" {
-    //                         let turn_key = turns[turn_index] as usize;
-    //                         if get_bot(turn_key) == value {
-    //                             score += 1;
-    //                         }
-    //                     }
-    //                 }
-    //             }
-
-    //             self.players_score.insert(&account_id, &score);
-
-    //             if score == MAX_TURNS {
-    //                 self.internal_mint(&account_id);
-    //                 self.internal_social_set(NEAR_SOCIAL_WINNER_BADGE.to_string(), account_id);
-    //                 log!("You win!");
-    //             }
-    //             else{
-    //                 log!("You didn't win. Deposit for NFT storage reverted");
-    //                 Promise::new(account_id).transfer(env::attached_deposit());
-    //             }
-    //         }
-    //     }
-
-    //     score
-    // }
-
-    // pub fn get_score(&self, account_id: AccountId) -> Option<usize> {
-    //     self.players_score.get(&account_id)
-    // }
-
-    // // legacy method to reward first winners
-    // #[private]
-    // pub fn set_winner(&mut self, account_id: AccountId) {
-    //     self.internal_social_set(NEAR_SOCIAL_WINNER_BADGE.to_string(), account_id);
-    // }
+        let mut outcome = self.votes_by_user.get(&account_id).unwrap();
+        outcome.total_votes += 1;
+        outcome.weighted_sum += weight(vote);
+        self.votes_by_user.insert(&account_id, &outcome);
+    }
 }
 
-// pub fn get_binary_random() -> usize {
-//     let random_seed = env::random_seed();
-//     (random_seed[0] % 2) as usize
-// }
+fn weight(vote: VoteChoice) -> i64 {
+    match vote {
+        VoteChoice::DefinitelyYes => 2,
+        VoteChoice::Yes => 1,
+        VoteChoice::No => -1,
+        VoteChoice::DefinitelyNo => -2,
+    }
+}
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
@@ -160,5 +169,77 @@ mod tests {
         
         testing_env!(context.is_view(true).build());
         assert_eq!(contract.get_height_inches(accounts(1)), Some(72));
+    }
+
+    #[test]
+    #[should_panic(expected = "Can't change your height")]
+    fn test_setting_height_twice() {
+        let mut context = get_context(accounts(1));
+        let mut contract = Contract::new();
+        
+        testing_env!(context.is_view(false).build());
+        contract.set_height_inches(72);
+
+        testing_env!(context.is_view(false).build());
+        contract.set_height_inches(74);
+    }
+
+    #[test]
+    #[should_panic(expected = "Can't confirm your own height")]
+    fn test_voting_on_own_account() {
+        let context = get_context(accounts(0));
+        let mut contract = Contract::new();
+        
+        testing_env!(context.build());
+
+        contract.vote(accounts(0), VoteChoice::DefinitelyYes);
+    }
+
+    #[test]
+    #[should_panic(expected = "This user must enter their height first")]
+    fn test_voting_without_height() {
+        let context = get_context(accounts(1));
+        let mut contract = Contract::new();
+        
+        testing_env!(context.build());
+
+        contract.vote(accounts(0), VoteChoice::DefinitelyYes);
+    }
+
+    #[test]
+    fn test_voting() {
+        let mut context = get_context(accounts(1));
+        let mut contract = Contract::new();
+        
+        testing_env!(context.build());
+
+        assert_eq!(contract.get_who_voted_for(accounts(1)), vec![]);
+        contract.set_height_inches(72);
+
+        testing_env!(context.predecessor_account_id(accounts(0)).build());
+
+        contract.vote(accounts(1), VoteChoice::DefinitelyYes);
+
+        assert_eq!(contract.get_who_voted_for(accounts(1)), vec![accounts(0)]);
+
+        assert_eq!(contract.get_confidence(accounts(1)), Some(Confidence::VeryConfidentTrue));
+
+        // Have another person vote a non-confident "no"
+        testing_env!(context.predecessor_account_id(accounts(2)).build());
+
+        contract.vote(accounts(1), VoteChoice::No);
+
+        assert_eq!(contract.get_who_voted_for(accounts(1)), vec![accounts(0), accounts(2)]);
+
+        assert_eq!(contract.get_confidence(accounts(1)), Some(Confidence::Inconclusive));
+
+        // Have another person vote a non-confident "yes"
+        testing_env!(context.predecessor_account_id(accounts(3)).build());
+
+        contract.vote(accounts(1), VoteChoice::Yes);
+
+        assert_eq!(contract.get_who_voted_for(accounts(1)), vec![accounts(0), accounts(2), accounts(3)]);
+
+        assert_eq!(contract.get_confidence(accounts(1)), Some(Confidence::Inconclusive));
     }
 }
