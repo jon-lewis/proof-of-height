@@ -82,6 +82,9 @@ impl Contract {
         match self.votes_by_user.get(&account_id) {
             None => None,
             Some(votes) => {
+                if votes.total_votes == 0 {
+                    return Some(Confidence::Inconclusive);
+                }
                 let score = votes.weighted_sum / votes.total_votes as i64;
                 println!("Score: {}", score);
                 Some(match score {
@@ -239,6 +242,20 @@ mod tests {
         contract.vote(accounts(1), VoteChoice::Yes);
 
         assert_eq!(contract.get_who_voted_for(accounts(1)), vec![accounts(0), accounts(2), accounts(3)]);
+
+        assert_eq!(contract.get_confidence(accounts(1)), Some(Confidence::Inconclusive));
+    }
+
+    #[test]
+    fn test_confidence_without_votes() {
+        let mut context = get_context(accounts(1));
+        let mut contract = Contract::new();
+        
+        testing_env!(context.build());
+
+        contract.set_height_inches(72);
+
+        testing_env!(context.predecessor_account_id(accounts(0)).build());
 
         assert_eq!(contract.get_confidence(accounts(1)), Some(Confidence::Inconclusive));
     }
