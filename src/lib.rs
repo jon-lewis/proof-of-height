@@ -2,7 +2,7 @@ use near_sdk::{
     near_bindgen, AccountId, BorshStorageKey, PanicOnDefault, Gas, env, ext_contract, Balance,
     borsh::{self, BorshDeserialize, BorshSerialize},
     collections::{LookupMap},
-    serde::{Deserialize, Serialize}, store::UnorderedSet, CryptoHash, require,
+    serde::{Deserialize, Serialize}, store::UnorderedSet, CryptoHash, require, NearSchema,
 };
 use near_sdk::serde_json::{Value};
 //mod social;
@@ -21,7 +21,7 @@ pub enum StorageKey {
     SubVotersByUserSet { account_hash: CryptoHash },
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Clone, Deserialize, Serialize)]
+#[derive(NearSchema, BorshDeserialize, BorshSerialize, Clone, Deserialize, Serialize)]
 #[serde(crate = "near_sdk::serde")]
 pub enum VoteChoice {
     DefinitelyYes,
@@ -36,14 +36,14 @@ pub struct Votes {
     total_votes: u32,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Clone, Deserialize, Serialize, PartialEq, Debug)]
+#[derive(NearSchema, BorshDeserialize, BorshSerialize, Clone, Deserialize, Serialize, PartialEq, Debug)]
 #[serde(crate = "near_sdk::serde")]
 pub enum Confidence {
-    VeryConfidentLie,
-    MostlyConfidentLie,
+    Lie,
+    ProbablyALie,
     Inconclusive,
-    MostlyConfidentTrue,
-    VeryConfidentTrue
+    MightBeTrue,
+    True
 }
 
 #[near_bindgen]
@@ -85,10 +85,10 @@ impl Contract {
                 let score = votes.weighted_sum / votes.total_votes as i64;
                 println!("Score: {}", score);
                 Some(match score {
-                    -2 => Confidence::VeryConfidentLie,
-                    -1 => Confidence::MostlyConfidentLie,
-                    1 => Confidence::MostlyConfidentTrue,
-                    2 => Confidence::VeryConfidentTrue,
+                    -2 => Confidence::Lie,
+                    -1 => Confidence::ProbablyALie,
+                    1 => Confidence::MightBeTrue,
+                    2 => Confidence::True,
                     _ => Confidence::Inconclusive
                 })
             }
@@ -222,7 +222,7 @@ mod tests {
 
         assert_eq!(contract.get_who_voted_for(accounts(1)), vec![accounts(0)]);
 
-        assert_eq!(contract.get_confidence(accounts(1)), Some(Confidence::VeryConfidentTrue));
+        assert_eq!(contract.get_confidence(accounts(1)), Some(Confidence::True));
 
         // Have another person vote a non-confident "no"
         testing_env!(context.predecessor_account_id(accounts(2)).build());
